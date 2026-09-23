@@ -1,0 +1,10 @@
+# 一次性验收服务镜像：带完整浏览器系统依赖的 Playwright 官方基底
+FROM mcr.microsoft.com/playwright:v1.48.2-noble
+WORKDIR /app
+ENV NODE_ENV=development
+COPY package.json package-lock.json* ./
+RUN npm ci
+RUN npx playwright install chromium
+COPY . .
+# verify 是 one-shot：跑完全部 E2E 即退出（退出码即验收结果）
+CMD ["npx", "playwright", "test", "--reporter=list"]

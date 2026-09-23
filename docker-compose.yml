@@ -1,0 +1,41 @@
+# 穹顶讲解 · Docker Compose
+#
+# 页面端口可用 WEB_PORT 覆盖，默认 8080：
+#   docker compose up --build web
+#   WEB_PORT=9000 docker compose up --build web
+#
+# 一次性验收（跑完即退出，退出码即验收结果）：
+#   docker compose run --rm verify
+# 或构建后：
+#   docker compose up --build --abort-on-container-exit verify
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # 仅用于文档化/一致性；容器内固定监听 8000，宿主端口由下面的映射覆盖。
+      - WEB_PORT=${WEB_PORT:-8080}
+    ports:
+      # 宿主 ${WEB_PORT} -> 容器 8000，可被环境变量覆盖。
+      - "${WEB_PORT:-8080}:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/console"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile.verify
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      # 观众窗/控制台均在容器内由 Playwright 打开，直连 compose 网络内的 web:8000
+      - BASE_URL=http://web:8000
+      - CI=true
+    command: ["npx", "playwright", "test", "--reporter=list"]
+    restart: "no"
