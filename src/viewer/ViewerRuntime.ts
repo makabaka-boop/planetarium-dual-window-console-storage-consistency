@@ -13,7 +13,7 @@
  * 状态机内的 inFlight 再提供一层同序号/同目标校验，双重防线。
  */
 import { MessageBus } from '../bus';
-import { getBlob, loadFrozen } from '../db';
+import { StorageError, getBlob, loadFrozen } from '../db';
 import { decodeBlob, drawCover } from '../image';
 import {
   CommandMessage,
@@ -284,11 +284,26 @@ export class ViewerRuntime {
     if (cached) return cached;
     const blobId = this.blobIdByPage[page];
     if (!blobId) throw new Error('blob missing for page');
-    const blob = await getBlob(blobId);
-    if (!blob) throw new Error('blob not found in IndexedDB');
-    const img = await decodeBlob(blob);
-    this.cache.set(page, img);
-    return img;
+    // 存储瞬时失败（事务中止/权限抖动）不应被误判为“图片坏了”而回报
+    // IMAGE_FAILED：短暂退避后重读；记录不存在/解码失败等业务错误立即抛出，
+    // 保持“单张坏图只标记该项”的既有语义与速度。
+    let attempt = 0;
+    for (;;) {
+      try {
+        const blob = await getBlob(blobId);
+        if (!blob) throw new Error('blob not found in IndexedDB');
+        const img = await decodeBlob(blob);
+        this.cache.set(page, img);
+        return img;
+      } catch (err) {
+        if (err instanceof StorageError && attempt < 2) {
+          attempt += 1;
+          await new Promise((r) => setTimeout(r, 60 * attempt));
+          continue;
+        }
+        throw err instanceof Error ? err : new Error('image load failed');
+      }
+    }
   }
 
   /** 恢复完成时绘制快照确认帧；仅当代次仍有效时提交。 */

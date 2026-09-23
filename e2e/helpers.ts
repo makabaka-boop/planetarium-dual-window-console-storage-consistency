@@ -383,3 +383,185 @@ export async function canvasCenterPixel(viewer: Page): Promise<[number, number, 
     return [d[0], d[1], d[2]] as [number, number, number];
   });
 }
+
+// ---- IndexedDB 存储故障注入 ----------------------------------------------
+
+export type DbFaultPhase = 'before' | 'afterRequest';
+export interface DbFaultArmRule {
+  /** 精确 reason 或前缀（以 * 结尾，如 'save*'）；缺省匹配全部写事务。 */
+  reason?: string;
+  /** 涉及的 store（AND 匹配，多 store 事务需全部包含）。 */
+  stores?: string[];
+  phase: DbFaultPhase;
+  /** 命中一次后自动解除（默认一次性，精确卡住某一个提交边界）。 */
+  once?: boolean;
+  /** 跳过前 N 次匹配（同一 reason 的连续提交中精确命中第 N+1 个边界）。 */
+  skip?: number;
+}
+
+/**
+ * 在任何应用脚本之前安装 IndexedDB 故障注入钩子（src/db.ts 读取 window.__domeDbFaults）。
+ * 钩子状态在页面生命周期内保留；同一 context 下刷新页面会重建对象，
+ * 因此需要“跨越刷新继续生效”的规则时，在刷新后重新 arm（见 armDbFault）。
+ */
+export async function installDbFaultsInit(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const W = window as unknown as {
+      __domeDbFaults?: {
+        rules: Array<Record<string, unknown>>;
+        openRule: { fail: boolean; once?: boolean } | null;
+        lastFailure: Record<string, unknown> | null;
+        failureCount: number;
+        arm: (rule: Record<string, unknown>) => void;
+        armOpen: (rule: { fail: boolean; once?: boolean }) => void;
+        disarm: () => void;
+      };
+    };
+    if (W.__domeDbFaults) return;
+    W.__domeDbFaults = {
+      rules: [],
+      openRule: null,
+      lastFailure: null,
+      failureCount: 0,
+      arm(rule) {
+        W.__domeDbFaults!.rules.push({ once: true, ...rule });
+      },
+      armOpen(rule) {
+        W.__domeDbFaults!.openRule = rule;
+      },
+      disarm() {
+        W.__domeDbFaults!.rules = [];
+        W.__domeDbFaults!.openRule = null;
+      }
+    };
+  });
+}
+
+export async function armDbFault(page: Page, rule: DbFaultArmRule): Promise<void> {
+  await page.evaluate((r) => {
+    (
+      window as unknown as {
+        __domeDbFaults: { arm: (rule: Record<string, unknown>) => void };
+      }
+    ).__domeDbFaults.arm(r);
+  }, rule);
+}
+
+export async function armDbOpenFault(page: Page, once = true): Promise<void> {
+  await page.evaluate(
+    (o) => {
+      (
+        window as unknown as {
+          __domeDbFaults: { armOpen: (rule: { fail: boolean; once?: boolean }) => void };
+        }
+      ).__domeDbFaults.armOpen(o);
+    },
+    { fail: true, once }
+  );
+}
+
+export async function disarmDbFaults(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as unknown as { __domeDbFaults: { disarm: () => void } }).__domeDbFaults.disarm();
+  });
+}
+
+export interface DbFaultStatus {
+  failureCount: number;
+  lastFailure: { reason: string; stores: string[]; phase: string } | null;
+}
+
+export async function dbFaultStatus(page: Page): Promise<DbFaultStatus> {
+  return page.evaluate(() => {
+    const h = (window as unknown as { __domeDbFaults?: DbFaultStatus }).__domeDbFaults;
+    return {
+      failureCount: h?.failureCount ?? 0,
+      lastFailure: h?.lastFailure ?? null
+    };
+  });
+}
+
+// ---- 直接读取磁盘持久记录（绕过应用内存，核对“最后可恢复记录”） ----------
+
+export interface PersistedState {
+  hasSession: boolean;
+  running: boolean | null;
+  sessionId: string | null;
+  confirmed: { seq: number; page: number; blackout: boolean } | null;
+  pending: { seq: number; status: string; target: { page: number; blackout: boolean } } | null;
+  draftCount: number;
+  blobCount: number;
+  frozenLatestCount: number | null;
+}
+
+const DB_NAME = 'dome-presenter';
+
+/** 直接打开同源 IndexedDB 读取磁盘上的会话/草稿/Blob/冻结节目单（与应用库结构一致）。 */
+export async function readPersistedState(page: Page): Promise<PersistedState> {
+  return page.evaluate((dbName) => {
+    return new Promise<PersistedState>((resolve, reject) => {
+      const req = indexedDB.open(dbName, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        const out: PersistedState = {
+          hasSession: false,
+          running: null,
+          sessionId: null,
+          confirmed: null,
+          pending: null,
+          draftCount: 0,
+          blobCount: 0,
+          frozenLatestCount: null
+        };
+        const tx = db.transaction(['session', 'program', 'blobs'], 'readonly');
+        const sessionReq = tx.objectStore('session').get('current');
+        const draftReq = tx.objectStore('program').get('draft');
+        const frozenReq = tx.objectStore('program').get('frozen:latest');
+        const countReq = tx.objectStore('blobs').count();
+        tx.oncomplete = () => {
+          interface DurableSession {
+            sessionId: string;
+            running: boolean;
+            lastConfirmed: { seq: number; page: number; blackout: boolean };
+            pending: {
+              seq: number;
+              status: string;
+              target: { page: number; blackout: boolean };
+            } | null;
+          }
+          const row = sessionReq.result as { session: DurableSession } | undefined;
+          if (row?.session) {
+            const s = row.session;
+            out.hasSession = true;
+            out.running = s.running;
+            out.sessionId = s.sessionId;
+            out.confirmed = s.lastConfirmed;
+            out.pending = s.pending
+              ? {
+                  seq: s.pending.seq,
+                  status: s.pending.status,
+                  target: s.pending.target
+                }
+              : null;
+          }
+          const draft = draftReq.result as { items?: unknown[] } | undefined;
+          out.draftCount = draft?.items?.length ?? 0;
+          const frozen = frozenReq.result as { items?: unknown[] } | undefined;
+          out.frozenLatestCount = frozen?.items?.length ?? null;
+          out.blobCount = countReq.result;
+          db.close();
+          resolve(out);
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  }, DB_NAME);
+}
+
+/** 控制台横幅的可重试操作类型（data-op 属性）。 */
+export async function storageErrorOp(consolePage: Page): Promise<string | null> {
+  const banner = consolePage.getByTestId('storage-error');
+  if ((await banner.count()) === 0) return null;
+  return banner.getAttribute('data-op');
+}

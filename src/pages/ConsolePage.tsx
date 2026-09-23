@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import { ConsoleController } from '../console/ConsoleController';
+import { ConsoleController, StorageError } from '../console/ConsoleController';
 import { SlideItem } from '../protocol/types';
 import { Thumb } from '../components/Thumb';
 
@@ -22,7 +22,7 @@ export function ConsolePage() {
   }, []);
 
   const state = controller.getState();
-  const { draft, session, frozen, popup } = state;
+  const { draft, session, frozen, popup, storageError, unsynced } = state;
   const pending = session?.pending ?? null;
   const currentPage = session?.lastConfirmed.page ?? 0;
   const blackout = session?.lastConfirmed.blackout ?? false;
@@ -51,6 +51,24 @@ export function ConsolePage() {
           )}
         </div>
       </header>
+
+      {storageError && (
+        <StorageBanner error={storageError} onRetry={() => void controller.retryStorage()} />
+      )}
+      {!storageError && unsynced && running && (
+        <div className="storage-error" data-testid="unsynced-banner" data-op={unsynced.kind} role="alert">
+          <div className="storage-error-text">
+            <strong>UNSYNCED · 有操作未持久化</strong>
+            <span>
+              刷新前有一次切换未能写入磁盘：权威画面仍以磁盘记录为准。请重试该操作
+              （沿用原序号，观众窗已呈现时只会重放确认，不会跳页）。
+            </span>
+          </div>
+          <button className="btn btn-warn" onClick={() => void controller.retryStorage()} data-testid="unsynced-retry">
+            重试未持久化的切换
+          </button>
+        </div>
+      )}
 
       <main className="layout">
         <section className="panel program-panel">
@@ -367,6 +385,39 @@ function PreviewModal(props: { item: SlideItem; onClose: () => void }) {
           关闭
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 存储失败横幅：任何 IndexedDB 写入（或打开）失败时给出“确定且可重试”的状态。
+ * 未持久化的会话/命令绝不会被宣布成功，权威状态停留在磁盘上最后可恢复记录；
+ * 讲解员释放空间/恢复权限后点击重试即可重新收敛。
+ */
+function StorageBanner(props: { error: StorageError; onRetry: () => void }) {
+  const descriptions: Record<StorageError['operation']['kind'], string> = {
+    init: '浏览器存储不可用，当前未从磁盘恢复任何会话。',
+    startShow: '开始放映未能写入：节目单冻结或会话保存失败，当前仍是编辑模式（上一场记录未被覆盖）。',
+    command: '命令未能持久化：观众窗尚未收到该切换，刷新将恢复到最后已确认页。',
+    retry: '重试命令未能持久化：刷新将恢复到最后已确认页。',
+    ack: '确认已到达但未能持久化：该页暂不能标记为已确认，磁盘仍保留未确认命令。',
+    expire: '未确认状态未能持久化。',
+    endShow: '停映清理失败：会话仍在运行，刷新会恢复本场放映；请重试结束。',
+    draft: '节目单草稿未能保存：磁盘保留上一版节目单。',
+    addFiles: '图片导入未能完整写入（Blob 与草稿已一并回滚）。'
+  };
+  const kind = props.error.operation.kind;
+  const retryLabel = kind === 'addFiles' ? '我知道了' : '重试写入';
+  return (
+    <div className="storage-error" data-testid="storage-error" data-op={kind} role="alert">
+      <div className="storage-error-text">
+        <strong>STORAGE_ERROR · 存储失败</strong>
+        <span>{descriptions[kind]}</span>
+        <span className="mono">原因：{props.error.message || '未知存储错误'}</span>
+      </div>
+      <button className="btn btn-warn" onClick={props.onRetry} data-testid="storage-retry">
+        {retryLabel}
+      </button>
     </div>
   );
 }
