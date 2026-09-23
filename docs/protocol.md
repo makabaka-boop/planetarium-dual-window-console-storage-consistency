@@ -67,14 +67,31 @@
 
 - IndexedDB：
   - `blobs`：`{ blobId, blob(Blob), name }`；
-  - `program`：`draft`（草稿）与 `frozen:<sessionId>`（随会话冻结的顺序）；
+  - `program`：`draft`（草稿）与 `frozen:<sessionId>`（随会话冻结的顺序，
+    另写 `frozen:latest` 兼容键）；
   - `session`：`current`（运行中会话的完整权威状态）。
+- **事务级成功判定**：写入 Promise 只在事务 `complete` 后 resolve；请求
+  `onsuccess` 但事务随后 abort（空间不足/权限收回）一律按失败处理。
+- **开始放映原子落库**：`frozen:<id>`、`frozen:latest`、`current` 三行在
+  同一个多对象库事务内提交，要么全部可见、要么全部回滚。失败时控制台不
+  进入运行/冻结态、不打开观众窗，磁盘保留上一会话或无会话。
+- **先持久化后宣布**：
+  - 切页/跳页/遮黑/重试命令：会话（含未决命令）事务成功后才把 CMD 送往
+    观众窗；失败时命令不外发、内存权威保持旧页，告警条提供重试；
+  - ACK 推进：收到确认后先持久化新 `lastConfirmed`，事务成功才标记
+    “已呈现（权威）”；失败时 UI 保持待确认、磁盘保留未确认命令，可重试；
+  - 停映：删除 `current` 的事务成功后才发送 SESSION_ENDED 并清空内存；
+    失败时会话继续运行并可重试，已结束会话不会因清理失败而在刷新后复活。
+- 控制台所有持久化变更经一条 FIFO 串行队列提交，内存推进顺序与磁盘提交
+  顺序严格一致；失败作业登记为“可重试”作用范围（boot/draft/show:start/
+  command/show:end），不覆盖最后一条已落盘记录。
 - 控制台刷新：从 IDB 恢复会话；若存在未决命令，统一标记为 `unconfirmed`
   （不自动重发，由讲解员决定，序号不变）。
 - 观众窗刷新/重开：`SNAPSHOT_REQ` → 读取该会话冻结节目单 → 应用
   `confirmed` 快照 → 进入 `live`。
 - 收敛终点：控制台“已呈现（权威）”标记与穹顶实际画面始终等于同一个
-  `lastConfirmed`。
+  `lastConfirmed`；任何失败边界之后刷新双方，画面、会话、待确认状态与
+  磁盘记录仍完全一致。
 
 ## 超时
 

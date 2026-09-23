@@ -3,6 +3,14 @@ import { ConsoleController } from '../console/ConsoleController';
 import { SlideItem } from '../protocol/types';
 import { Thumb } from '../components/Thumb';
 
+const STORAGE_SCOPE_LABEL: Record<string, string> = {
+  boot: '读取浏览器存储',
+  draft: '保存节目单草稿',
+  'show:start': '开始放映（冻结节目单/会话）',
+  command: '保存会话状态',
+  'show:end': '停映清理'
+};
+
 export function ConsolePage() {
   const controllerRef = useRef<ConsoleController | null>(null);
   if (!controllerRef.current) controllerRef.current = new ConsoleController();
@@ -51,6 +59,38 @@ export function ConsolePage() {
           )}
         </div>
       </header>
+
+      {state.storageErrors.length > 0 && (
+        <div className="storage-errors" data-testid="storage-errors">
+          {state.storageErrors.map((issue) => (
+            <div className="storage-error" key={issue.scope} data-testid={`storage-error-${issue.scope}`}>
+              <span>
+                存储失败（{STORAGE_SCOPE_LABEL[issue.scope] ?? issue.scope}）：{issue.message}
+                {issue.scope === 'show:end' && ' 当前放映仍在运行，结束尚未生效。'}
+                {(issue.scope === 'command' || issue.scope === 'show:start') &&
+                  ' 该操作未被宣布成功，刷新不会丢失更多状态。'}
+              </span>
+              {issue.scope === 'boot' ? (
+                <button
+                  className="btn btn-mini"
+                  onClick={() => void controller.init()}
+                  data-testid={`retry-storage-${issue.scope}`}
+                >
+                  重新连接存储
+                </button>
+              ) : (
+                <button
+                  className="btn btn-mini"
+                  onClick={() => void controller.retryStorage(issue.scope)}
+                  data-testid={`retry-storage-${issue.scope}`}
+                >
+                  重试持久化
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       <main className="layout">
         <section className="panel program-panel">

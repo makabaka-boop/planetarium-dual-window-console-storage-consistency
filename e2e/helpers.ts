@@ -383,3 +383,119 @@ export async function canvasCenterPixel(viewer: Page): Promise<[number, number, 
     return [d[0], d[1], d[2]] as [number, number, number];
   });
 }
+
+// --- IndexedDB 存储故障注入 -----------------------------------------------
+
+export type DbFaultMode = 'abort-request' | 'abort-now' | 'quota';
+
+export interface DbFaultRule {
+  scope: string;
+  mode: DbFaultMode;
+}
+
+/**
+ * 在页面上建立 __domeDbFaults 控制台（db.ts 仅在该全局存在时启用故障）。
+ * 必须在应用脚本之前注入；rules 可在运行时随时替换，命中记录在 hits。
+ */
+export async function installDbFaultControls(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const W = window as unknown as {
+      __domeDbFaults?: { rules: DbFaultRule[]; hits: string[] };
+    };
+    if (!W.__domeDbFaults) {
+      W.__domeDbFaults = { rules: [], hits: [] };
+    }
+  });
+}
+
+/** 替换故障规则（精确 scope 或 scope 前缀匹配 db.ts 的提交边界标签）。 */
+export async function setDbFaults(
+  page: Page,
+  rules: Array<{ scope: string; mode: DbFaultMode }>
+): Promise<void> {
+  await page.evaluate((rs) => {
+    const controls = (window as unknown as {
+      __domeDbFaults: { rules: DbFaultRule[]; hits: string[] };
+    }).__domeDbFaults;
+    controls.rules = rs as DbFaultRule[];
+    controls.hits = [];
+  }, rules);
+}
+
+export async function clearDbFaults(page: Page): Promise<void> {
+  await setDbFaults(page, []);
+}
+
+/** 读取自上次 setDbFaults 以来命中过的提交边界标签。 */
+export async function dbFaultHits(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const controls = (window as unknown as {
+      __domeDbFaults?: { hits: string[] };
+    }).__domeDbFaults;
+    return controls ? [...controls.hits] : [];
+  });
+}
+
+/**
+ * 直接读取持久化的当前会话（不经应用内存）：
+ * 返回 null 表示无 current 记录（未开始或已停映清理）。
+ */
+export async function readPersistedSession(page: Page): Promise<Record<string, unknown> | null> {
+  return page.evaluate(
+    () =>
+      new Promise<Record<string, unknown> | null>((resolve, reject) => {
+        const req = indexedDB.open('dome-presenter');
+        req.onupgradeneeded = () => req.transaction!.abort();
+        req.onsuccess = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('session')) {
+            db.close();
+            resolve(null);
+            return;
+          }
+          const tx = db.transaction('session', 'readonly');
+          const get = tx.objectStore('session').get('current');
+          get.onsuccess = () => {
+            db.close();
+            resolve((get.result as Record<string, unknown> | undefined) ?? null);
+          };
+          get.onerror = () => {
+            db.close();
+            reject(get.error);
+          };
+        };
+        req.onerror = () => reject(req.error);
+      })
+  );
+}
+
+/** 直接读取持久化的草稿行。 */
+export async function readPersistedDraft(page: Page): Promise<unknown[] | null> {
+  return page.evaluate(
+    () =>
+      new Promise<unknown[] | null>((resolve, reject) => {
+        const req = indexedDB.open('dome-presenter');
+        req.onupgradeneeded = () => req.transaction!.abort();
+        req.onsuccess = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('program')) {
+            db.close();
+            resolve(null);
+            return;
+          }
+          const tx = db.transaction('program', 'readonly');
+          const get = tx.objectStore('program').get('draft');
+          get.onsuccess = () => {
+            db.close();
+            const row = get.result as { items?: unknown[] } | undefined;
+            resolve(row?.items ?? null);
+          };
+          get.onerror = () => {
+            db.close();
+            reject(get.error);
+          };
+        };
+        req.onerror = () => reject(req.error);
+      })
+  );
+}

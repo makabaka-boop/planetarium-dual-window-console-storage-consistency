@@ -321,6 +321,26 @@ body,
   align-items: flex-start;
 }
 
+.storage-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 24px 12px;
+}
+
+.storage-error {
+  background: rgba(239, 91, 91, 0.14);
+  border: 1px solid var(--danger);
+  color: #ffd9d9;
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+}
+
 .live-controls {
   display: flex;
   flex-direction: column;
